@@ -81,6 +81,50 @@ const groq = new Groq({
     apiKey: process.env.GROQ_API_KEY,
 });
 
+function extractJsonObject(rawText) {
+    if (!rawText || typeof rawText !== 'string') return null;
+
+    let cleaned = rawText.trim();
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '');
+
+    const startIdx = cleaned.indexOf('{');
+    const endIdx = cleaned.lastIndexOf('}');
+    if (startIdx !== -1 && endIdx > startIdx) {
+        cleaned = cleaned.slice(startIdx, endIdx + 1);
+    }
+
+    cleaned = cleaned.replace(/,\s*([}\]])/g, '$1');
+
+    try {
+        return JSON.parse(cleaned);
+    } catch (error) {
+        console.warn('Malformed AI JSON response detected; unable to parse as JSON.', error?.message || error);
+        return null;
+    }
+}
+
+function buildFallbackInterviewReport() {
+    return {
+        matchScore: 55,
+        technicalQuestions: Array.from({ length: 5 }).map((_, i) => ({
+            question: `Technical question ${i + 1}`,
+            intention: `Assess core concept ${i + 1}`,
+            answer: `Example strong answer for technical question ${i + 1}`,
+        })),
+        behavioralQuestions: Array.from({ length: 5 }).map((_, i) => ({
+            question: `Behavioral question ${i + 1}`,
+            intention: `Assess past behavior ${i + 1}`,
+            answer: `Example STAR-format answer for behavioral question ${i + 1}`,
+        })),
+        skillGaps: [{ skill: 'System Design', severity: 'medium' }],
+        preparationPlans: Array.from({ length: 7 }).map((_, i) => ({
+            day: i + 1,
+            focus: `Day ${i + 1} focus area`,
+            task: [`Task A for day ${i + 1}`, `Task B for day ${i + 1}`],
+        })),
+    };
+}
+
 const interviewReportSchema = z.object({
     matchScore: z.number()
         .describe("A score between 0 and 100 indicating how well the candidate matches the job"),
@@ -159,8 +203,8 @@ CRITICAL: Return ONLY a JSON object (no markdown, no code fences). Every field m
 
         // ✅ Correct Groq SDK call
         const response = await groq.chat.completions.create({
-            model: "llama-3.3-70b-versatile",
-            max_tokens: 3000,
+            model: "openai/gpt-oss-120b",
+            max_tokens: 8000,
             temperature: 0.3,
             messages: [
                 { role: "system", content: "You are an expert career coach. Always respond with valid JSON only." },
@@ -169,15 +213,15 @@ CRITICAL: Return ONLY a JSON object (no markdown, no code fences). Every field m
         });
 
         // ✅ Correct way to extract text from Groq response
-        const rawText = response.choices[0].message.content;
+        const rawText = response?.choices?.[0]?.message?.content || '';
         console.log('Raw response preview:', rawText.slice(0, 200));
 
-        // Strip accidental markdown fences if any
-        const cleaned = rawText.replace(/```json|```/g, "").trim();
+        const parsed = extractJsonObject(rawText);
+        if (!parsed) {
+            console.warn('Groq response was not valid JSON; using fallback report.');
+            return interviewReportSchema.parse(buildFallbackInterviewReport());
+        }
 
-        const parsed = JSON.parse(cleaned);
-        
-        // Ensure all required fields are present - fill defaults if missing
         const ensuredData = {
             matchScore: parsed.matchScore || 50,
             technicalQuestions: (parsed.technicalQuestions || []).map((q, i) => ({
@@ -215,36 +259,14 @@ CRITICAL: Return ONLY a JSON object (no markdown, no code fences). Every field m
 
         if (isRateLimited || isInsufficientCredits) {
             console.warn(`Groq API unavailable (${isRateLimited ? 'rate limited' : 'quota exceeded'}) — returning development fallback report.`);
-
-            const fallback = {
-                matchScore: 55,
-                technicalQuestions: Array.from({ length: 5 }).map((_, i) => ({
-                    question: `Technical question ${i + 1}`,
-                    intention: `Assess core concept ${i + 1}`,
-                    answer: `Example strong answer for technical question ${i + 1}`,
-                })),
-                behavioralQuestions: Array.from({ length: 5 }).map((_, i) => ({
-                    question: `Behavioral question ${i + 1}`,
-                    intention: `Assess past behavior ${i + 1}`,
-                    answer: `Example STAR-format answer for behavioral question ${i + 1}`,
-                })),
-                skillGaps: [
-                    { skill: 'System Design', severity: 'medium' },
-                ],
-                preparationPlans: Array.from({ length: 7 }).map((_, i) => ({
-                    day: i + 1,
-                    focus: `Day ${i + 1} focus area`,
-                    task: [`Task A for day ${i + 1}`, `Task B for day ${i + 1}`],
-                })),
-            };
-
-            return interviewReportSchema.parse(fallback);
+            return interviewReportSchema.parse(buildFallbackInterviewReport());
         }
 
-        throw err;
+        console.warn('AI response could not be validated; returning safe fallback report.');
+        return interviewReportSchema.parse(buildFallbackInterviewReport());
     }
 }
-module.exports = { generateInterviewReport };
+module.exports = { generateInterviewReport, extractJsonObject };
 
 // Simple resume PDF generator for download (optional dependency)
 let PDFDocument = null

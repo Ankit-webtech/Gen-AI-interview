@@ -22,13 +22,16 @@ const Home = () => {
             return
         }
         console.log('Generating report with', { jobDescriptionLength: jobDescription.length, selfDescriptionLength: selfDescription.length, hasResume: !!fileToSend })
-        const data = await generateReport({ jobDescription, selfDescription, resumeFile: fileToSend })
-        if (!data) {
-            // API failed (possibly rate limited) — inform user
-            alert("Failed to generate interview report. Please try again in a few moments.")
-            return
+        try {
+            const data = await generateReport({ jobDescription, selfDescription, resumeFile: fileToSend })
+            if (!data) {
+                alert("Failed to generate interview report. Please try again in a few moments.")
+                return
+            }
+            navigate(`/interview/${data._id}`)
+        } catch (error) {
+            alert(error?.response?.data?.message || "The backend is unavailable. Start the backend and try again.")
         }
-        navigate(`/interview/${data._id}`)
     }
 
     if (loading) {

@@ -158,7 +158,11 @@ async function generateInterviewReportController(req, res) {
         console.error("Error generating interview report:", err?.message || err)
         // If AI service is throttling, return 503 with guidance
         const status = err?.statusCode || err?.status || 502
-        return res.status(status === 429 ? 429 : 503).json({ message: "Failed to generate interview report. Try again later." })
+        const responseStatus = status === 429 ? 429 : 503
+        const message = status === 502 && err?.message
+            ? err.message
+            : "Failed to generate interview report. Try again later."
+        return res.status(responseStatus).json({ message })
     }
 
 }

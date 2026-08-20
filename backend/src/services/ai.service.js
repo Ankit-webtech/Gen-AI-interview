@@ -81,6 +81,8 @@ const groq = new Groq({
     apiKey: process.env.GROQ_API_KEY,
 });
 
+const GROQ_MAX_OUTPUT_TOKENS = 6000;
+
 function extractJsonObject(rawText) {
     if (!rawText || typeof rawText !== 'string') return null;
 
@@ -123,6 +125,22 @@ function buildFallbackInterviewReport() {
             task: [`Task A for day ${i + 1}`, `Task B for day ${i + 1}`],
         })),
     };
+}
+
+function canUseFallbackReport() {
+    return process.env.NODE_ENV !== 'production' && process.env.ALLOW_AI_FALLBACK === 'true';
+}
+
+function fallbackOrThrow(errorMessage, cause) {
+    if (canUseFallbackReport()) {
+        console.warn(`${errorMessage} Using development fallback report.`);
+        return interviewReportSchema.parse(buildFallbackInterviewReport());
+    }
+
+    const error = new Error(errorMessage);
+    error.statusCode = 502;
+    error.cause = cause;
+    throw error;
 }
 
 const interviewReportSchema = z.object({
@@ -199,12 +217,16 @@ CRITICAL: Return ONLY a JSON object (no markdown, no code fences). Every field m
 }`;
 
     try {
+        if (!process.env.GROQ_API_KEY) {
+            return fallbackOrThrow('GROQ_API_KEY is not configured.', new Error('Missing GROQ_API_KEY'));
+        }
+
         console.log('AI prompt length:', prompt.length);
 
         // ✅ Correct Groq SDK call
         const response = await groq.chat.completions.create({
             model: "openai/gpt-oss-120b",
-            max_tokens: 8000,
+            max_tokens: GROQ_MAX_OUTPUT_TOKENS,
             temperature: 0.3,
             messages: [
                 { role: "system", content: "You are an expert career coach. Always respond with valid JSON only." },
@@ -218,8 +240,7 @@ CRITICAL: Return ONLY a JSON object (no markdown, no code fences). Every field m
 
         const parsed = extractJsonObject(rawText);
         if (!parsed) {
-            console.warn('Groq response was not valid JSON; using fallback report.');
-            return interviewReportSchema.parse(buildFallbackInterviewReport());
+            return fallbackOrThrow('Groq returned an invalid JSON response.');
         }
 
         const ensuredData = {
@@ -250,20 +271,22 @@ CRITICAL: Return ONLY a JSON object (no markdown, no code fences). Every field m
     } catch (err) {
         console.error('Error generating interview report:', err);
 
+        if (err?.statusCode === 502) {
+            throw err;
+        }
+
         const status = err?.status;
         const errorMessage = err?.error?.error?.message || err?.message || '';
 
-        // Check for rate limit (429) or insufficient credits (400)
-        const isRateLimited = status === 429;
-        const isInsufficientCredits = status === 400 && (errorMessage.includes('credit balance') || errorMessage.includes('quota'));
+        const providerMessage = status === 413 || errorMessage.includes('tokens per minute')
+            ? 'The AI request is too large for the current Groq token limit. Please try again with shorter resume or job-description text.'
+            : status === 429
+            ? 'Groq rate limit reached.'
+            : status === 400 && (errorMessage.includes('credit balance') || errorMessage.includes('quota'))
+                ? 'Groq quota or credit balance is exhausted.'
+                : 'Unable to generate an interview report from Groq.';
 
-        if (isRateLimited || isInsufficientCredits) {
-            console.warn(`Groq API unavailable (${isRateLimited ? 'rate limited' : 'quota exceeded'}) — returning development fallback report.`);
-            return interviewReportSchema.parse(buildFallbackInterviewReport());
-        }
-
-        console.warn('AI response could not be validated; returning safe fallback report.');
-        return interviewReportSchema.parse(buildFallbackInterviewReport());
+        return fallbackOrThrow(providerMessage, err);
     }
 }
 module.exports = { generateInterviewReport, extractJsonObject };
